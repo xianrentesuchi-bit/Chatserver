@@ -8,15 +8,13 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
 const crypto = require('crypto');
-require('dotenv').config(); // 環境変数の読み込み用
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 
-// 1. 基本的なセキュリティヘッダーの付与
 app.use(helmet());
 
-// 2. CORSの制限 (信頼できるドメインのみ許可)
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:3000'];
 app.use(cors({
   origin: (origin, callback) => {
@@ -30,32 +28,30 @@ app.use(cors({
   credentials: true
 }));
 
-// ペイロードサイズを制限してDoS攻撃を防止
 app.use(express.json({ limit: '10kb' }));
 
-// 3. レートリミット（連投・総当たり攻撃対策）
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15分
-  max: 100, // IPごとに最大100リクエスト
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: { error: 'リクエストが多すぎます。しばらく時間をおいてお試しください。' }
 });
 app.use('/api/', apiLimiter);
 
-// ★【変更点】環境変数から生のパスワードを取得し、起動時にハッシュ化する
 const RAW_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123'; 
 const ADMIN_PASSWORD_HASH = crypto.createHash('sha256').update(RAW_PASSWORD).digest('hex');
 
-// メモリ枯渇を防ぐため、最大保持件数を設定
 const MAX_MESSAGES = 500;
 let messages = [];
 let activeConnections = 0;
 
-// 1. [GET] 投稿一覧の取得
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/messages', (req, res) => {
   res.json(messages);
 });
 
-// 2. [POST] 新規投稿の受付（バリデーションとサニタイズを徹底）
 app.post('/api/messages', [
   body('username').trim().isLength({ min: 1, max: 24 }).escape(),
   body('message').trim().isLength({ min: 1, max: 1000 }).escape(),
@@ -70,7 +66,7 @@ app.post('/api/messages', [
   const { username, message, time, seed } = req.body;
 
   const newPost = {
-    id: crypto.randomUUID(), // インデックス依存を排除し、予測不可能なUUIDを付与
+    id: crypto.randomUUID(),
     username,
     message,
     time,
@@ -88,7 +84,6 @@ app.post('/api/messages', [
   res.status(201).json({ success: true, message: '投稿が完了しました。' });
 });
 
-// 3. [POST] パスワード認証および削除処理
 app.post('/api/pass', (req, res) => {
   const { password } = req.body;
 
@@ -96,10 +91,8 @@ app.post('/api/pass', (req, res) => {
     return res.status(400).json({ message: 'パスワードを入力してください' });
   }
 
-  // 入力されたパスワードをハッシュ化して比較用にする
   const inputHash = crypto.createHash('sha256').update(password).digest('hex');
   
-  // 安全な固定時間比較（タイミング攻撃対策）
   const isMatch = crypto.timingSafeEqual(
     Buffer.from(inputHash, 'utf-8'),
     Buffer.from(ADMIN_PASSWORD_HASH, 'utf-8')
@@ -117,12 +110,10 @@ app.post('/api/pass', (req, res) => {
   }
 });
 
-// 4. [GET] オンラインユーザー数の取得
 app.get('/user', (req, res) => {
   res.json({ userCount: activeConnections });
 });
 
-// Socket.IO 構成の最適化
 const io = new Server(server, {
   cors: {
     origin: ALLOWED_ORIGINS,
