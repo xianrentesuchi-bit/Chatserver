@@ -16,11 +16,10 @@ const server = http.createServer(app);
 // 1. 基本的なセキュリティヘッダーの付与
 app.use(helmet());
 
-// 2. CORSの制限 (信頼できるドメインのみ許可、* は絶対に避ける)
+// 2. CORSの制限 (信頼できるドメインのみ許可)
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:3000'];
 app.use(cors({
   origin: (origin, callback) => {
-    // 同一オリジンやモバイルアプリなどからのリクエストは origin が undefined になることがある
     if (!origin || ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true);
     } else {
@@ -42,9 +41,9 @@ const apiLimiter = rateLimit({
 });
 app.use('/api/', apiLimiter);
 
-// 管理用パスワード（環境変数から取得。未設定時のフォールバックは開発用のみ）
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || 
-  crypto.createHash('sha256').update('admin123').digest('hex');
+// ★【変更点】環境変数から生のパスワードを取得し、起動時にハッシュ化する
+const RAW_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123'; 
+const ADMIN_PASSWORD_HASH = crypto.createHash('sha256').update(RAW_PASSWORD).digest('hex');
 
 // メモリ枯渇を防ぐため、最大保持件数を設定
 const MAX_MESSAGES = 500;
@@ -81,7 +80,6 @@ app.post('/api/messages', [
 
   messages.push(newPost);
   
-  // メモリ管理：古い投稿を削除（上限を超えた場合）
   if (messages.length > MAX_MESSAGES) {
     messages.shift();
   }
@@ -91,7 +89,6 @@ app.post('/api/messages', [
 });
 
 // 3. [POST] パスワード認証および削除処理
-// タイム攻撃（Timing Attack）を防ぐために固定時間比較を使用
 app.post('/api/pass', (req, res) => {
   const { password } = req.body;
 
@@ -99,9 +96,10 @@ app.post('/api/pass', (req, res) => {
     return res.status(400).json({ message: 'パスワードを入力してください' });
   }
 
+  // 入力されたパスワードをハッシュ化して比較用にする
   const inputHash = crypto.createHash('sha256').update(password).digest('hex');
   
-  // crypto.timingSafeEqual で比較し、処理時間の差からパスワードを推測されるのを防ぐ
+  // 安全な固定時間比較（タイミング攻撃対策）
   const isMatch = crypto.timingSafeEqual(
     Buffer.from(inputHash, 'utf-8'),
     Buffer.from(ADMIN_PASSWORD_HASH, 'utf-8')
@@ -131,25 +129,19 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
     credentials: true
   },
-  transports: ['websocket'], // pollingを排除し、より安全で高速なwebsocketに絞る
-  allowEIO3: false // 脆弱性のある古いプロトコルを無効化
+  transports: ['websocket'],
+  allowEIO3: false
 });
 
 io.on('connection', (socket) => {
   activeConnections++;
   io.emit('userCount', { userCount: activeConnections });
 
-  // リアクションの処理
   socket.on('updateReaction', (data) => {
-    // 厳密な型・構造チェック
     if (!data || typeof data.messageId !== 'string' || typeof data.reaction !== 'string') return;
-    
-    // リアクション文字自体の長さを制限（スパム対策）
     if (data.reaction.length > 20) return;
 
     const { messageId, reaction } = data;
-    
-    // IDでメッセージを検索
     const targetMessage = messages.find(m => m.id === messageId);
     
     if (targetMessage) {
@@ -158,7 +150,6 @@ io.on('connection', (socket) => {
       }
       
       const currentCount = targetMessage.reactions[reaction] || 0;
-      // 1つのリアクション数が跳ね上がるのを防ぐ上限（カウンターライズ対策）
       if (currentCount < 9999) {
         targetMessage.reactions[reaction] = currentCount + 1;
       }
